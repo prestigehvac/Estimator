@@ -84,6 +84,7 @@ distributor_frames = []
 if uploaded_dist_files:
     for uploaded_file in uploaded_dist_files:
         filename = uploaded_file.name
+
         # 1. Process CSV Files
         if filename.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
@@ -98,7 +99,7 @@ if uploaded_dist_files:
                 df["Distributor_Source"] = f"{filename} ({sheet})"
                 distributor_frames.append(df)
 
-        # 3. Process PDF Files
+        # 3. Process PDF Files (With Row Normalization Fix)
         elif filename.endswith(".pdf"):
             pdf_rows = []
             with pdfplumber.open(uploaded_file) as pdf:
@@ -106,10 +107,34 @@ if uploaded_dist_files:
                     tables = page.extract_tables()
                     for table in tables:
                         for row in table:
-                            if any(row):
+                            # Filter empty or all-None rows
+                            if row and any(cell is not None and str(cell).strip() != "" for cell in row):
                                 pdf_rows.append(row)
+
             if pdf_rows:
-                pdf_df = pd.DataFrame(pdf_rows[1:], columns=pdf_rows[0])
+                # Find maximum column count across all extracted rows
+                max_cols = max(len(r) for r in pdf_rows)
+                
+                # Standardize header
+                headers = [
+                    str(h).strip() if h is not None and str(h).strip() != "" else f"Col_{i+1}"
+                    for i, h in enumerate(pdf_rows[0])
+                ]
+                # Pad header if missing columns
+                while len(headers) < max_cols:
+                    headers.append(f"Col_{len(headers)+1}")
+
+                # Pad or trim data rows to match header length exactly
+                normalized_rows = []
+                for r in pdf_rows[1:]:
+                    row_data = list(r)
+                    if len(row_data) < max_cols:
+                        row_data.extend([None] * (max_cols - len(row_data)))
+                    elif len(row_data) > max_cols:
+                        row_data = row_data[:max_cols]
+                    normalized_rows.append(row_data)
+
+                pdf_df = pd.DataFrame(normalized_rows, columns=headers)
                 pdf_df["Distributor_Source"] = filename
                 distributor_frames.append(pdf_df)
 
@@ -176,7 +201,7 @@ if ahri_df is not None and distributor_df is not None:
         priced_items = matched_results[matched_results[dist_price_col].notna()]
 
         st.success(
-            f"✨ Matching Complete! Found pricing for **{len(priced_items)}** out of **{len(raw_ahri_df)}** AHRI records across uploaded distributors."
+            f"✨ Matching Complete! Found pricing for **{len(priced_items)}** out of **{len(raw_ahri_df)}** AHRI records."
         )
 
         # Summary Metrics Cards
@@ -190,11 +215,6 @@ if ahri_df is not None and distributor_df is not None:
         st.dataframe(
             matched_results,
             use_container_width=True,
-            column_config={
-                dist_price_col: st.column_config.NumberColumn(
-                    "Price", format="$%.2f"
-                )
-            },
         )
 
         # Excel Download
