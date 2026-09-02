@@ -8,7 +8,6 @@ import streamlit as st
 st.set_page_config(
     page_title="Spreadsheet Pricing Cross-Referencer", layout="wide"
 )
-
 st.title("📊 Spreadsheet Pricing Cross-Referencer")
 st.write(
     "Cross-reference product/part numbers against a master database or PDF price list."
@@ -17,7 +16,8 @@ st.write(
 # --- SIDEBAR: DATABASE / SOURCE DATA UPLOAD ---
 st.sidebar.header("1. Master Source Data")
 source_type = st.sidebar.radio(
-    "Select Source Data Format:", ("Database / Excel / CSV", "PDF Price List")
+    "Select Source Data Format:",
+    ("Database / Excel / CSV", "PDF Price List"),
 )
 
 master_df = None
@@ -49,9 +49,8 @@ elif source_type == "PDF Price List":
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
-                        if any(
-                            row
-                        ):  # filter empty rows                    pdf_rows.append(row)
+                        if any(row):  # filter empty rows
+                            pdf_rows.append(row)
 
         if pdf_rows:
             # Assume first row as header if non-numeric
@@ -79,7 +78,6 @@ if uploaded_target:
 
     # Read selected sheet
     target_df = pd.read_excel(uploaded_target, sheet_name=selected_tab)
-
     st.write(
         f"**Preview of selected tab (`{selected_tab}`):**",
         target_df.head(),
@@ -113,7 +111,9 @@ if uploaded_target:
         )
         if query_input:
             match = master_df[
-                master_df[master_key_col].astype(str).str.contains(query_input)
+                master_df[master_key_col]
+                .astype(str)
+                .str.contains(query_input)
             ]
             st.write("Query Result:", match)
 
@@ -145,7 +145,9 @@ if uploaded_target:
             # Export to Excel Download
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                result_df.to_excel(writer, sheet_name=selected_tab, index=False)
+                result_df.to_excel(
+                    writer, sheet_name=selected_tab, index=False
+                )
 
             st.download_button(
                 label="📥 Download Updated Spreadsheet",
