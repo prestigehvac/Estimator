@@ -10,7 +10,7 @@ st.set_page_config(
 
 st.title("🏷️ AHRI & Distributor Pricing Lookup Tool")
 st.write(
-    "Upload your **Master AHRI Sheet** and **Distributor Price Lists** below to select a tonnage capacity and instantly view pricing options."
+    "Upload your **Master AHRI Sheet** and one or more **Distributor Price Lists** below to select a tonnage capacity and instantly view pricing options."
 )
 
 st.markdown("---")
@@ -18,11 +18,11 @@ st.markdown("---")
 # --- SECTION 1: MASTER AHRI UPLOAD ---
 with st.container():
     st.subheader("1️⃣ Step 1: Upload Master AHRI File")
-    
+
     uploaded_ahri = st.file_uploader(
-        "📁 Click to Upload Master AHRI File (.xlsx or .xls)", 
+        "📁 Click to Upload Master AHRI File (.xlsx or .xls)",
         type=["xlsx", "xls"],
-        key="master_ahri_uploader"
+        key="master_ahri_uploader",
     )
 
 raw_ahri_df = None
@@ -35,7 +35,7 @@ if uploaded_ahri:
 
     col_t1, col_t2 = st.columns([1, 2])
     with col_t1:
-        # Tonnage Dropdown Selection (pulls tab names like 2-Ton, 3-Ton, etc.)
+        # Tonnage Dropdown Selection
         selected_tonnage = st.selectbox(
             "🎯 Select Tonnage / Capacity Tab:", options=xls_ahri.sheet_names
         )
@@ -68,55 +68,60 @@ if uploaded_ahri:
 
 st.markdown("---")
 
-# --- SECTION 2: DISTRIBUTOR PRICE LIST UPLOAD ---
+# --- SECTION 2: MULTI-DISTRIBUTOR PRICE LIST UPLOAD ---
 with st.container():
-    st.subheader("2️⃣ Step 2: Upload Distributor Price List")
-    
-    distributor_type = st.radio(
-        "Select Distributor Price List Format:",
-        ("Excel / CSV File", "PDF Price List"),
-        horizontal=True,
+    st.subheader("2️⃣ Step 2: Upload Distributor Price Lists")
+
+    uploaded_dist_files = st.file_uploader(
+        "📁 Upload Distributor Price Sheets (Select multiple CSV, XLSX, or PDF files)",
+        type=["csv", "xlsx", "pdf"],
+        accept_multiple_files=True,
+        key="multi_distributor_uploader",
     )
 
-    distributor_df = None
+distributor_frames = []
 
-    if distributor_type == "Excel / CSV File":
-        uploaded_dist = st.file_uploader(
-            "📁 Click to Upload Distributor Price List (.csv, .xlsx)", 
-            type=["csv", "xlsx"],
-            key="distributor_uploader"
-        )
-        if uploaded_dist:
-            if uploaded_dist.name.endswith(".csv"):
-                distributor_df = pd.read_csv(uploaded_dist)
-            else:
-                xls_dist = pd.ExcelFile(uploaded_dist)
-                dist_sheet = st.selectbox(
-                    "Select Distributor Sheet Tab:", options=xls_dist.sheet_names
-                )
-                distributor_df = pd.read_excel(uploaded_dist, sheet_name=dist_sheet)
+if uploaded_dist_files:
+    for uploaded_file in uploaded_dist_files:
+        filename = uploaded_file.name
+        # 1. Process CSV Files
+        if filename.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+            df["Distributor_Source"] = filename
+            distributor_frames.append(df)
 
-    elif distributor_type == "PDF Price List":
-        uploaded_pdf = st.file_uploader(
-            "📁 Click to Upload Distributor PDF Price List (.pdf)", 
-            type=["pdf"],
-            key="pdf_distributor_uploader"
-        )
-        if uploaded_pdf:
+        # 2. Process Excel Files
+        elif filename.endswith((".xlsx", ".xls")):
+            xls = pd.ExcelFile(uploaded_file)
+            for sheet in xls.sheet_names:
+                df = pd.read_excel(uploaded_file, sheet_name=sheet)
+                df["Distributor_Source"] = f"{filename} ({sheet})"
+                distributor_frames.append(df)
+
+        # 3. Process PDF Files
+        elif filename.endswith(".pdf"):
             pdf_rows = []
-            with pdfplumber.open(uploaded_pdf) as pdf:
+            with pdfplumber.open(uploaded_file) as pdf:
                 for page in pdf.pages:
                     tables = page.extract_tables()
                     for table in tables:
                         for row in table:
                             if any(row):
                                 pdf_rows.append(row)
-
             if pdf_rows:
-                distributor_df = pd.DataFrame(pdf_rows[1:], columns=pdf_rows[0])
-                st.success(f"✅ Extracted {len(distributor_df)} rows from PDF.")
-            else:
-                st.error("❌ Could not extract tabular data from PDF.")
+                pdf_df = pd.DataFrame(pdf_rows[1:], columns=pdf_rows[0])
+                pdf_df["Distributor_Source"] = filename
+                distributor_frames.append(pdf_df)
+
+    if distributor_frames:
+        distributor_df = pd.concat(distributor_frames, ignore_index=True)
+        st.success(
+            f"✅ Processed **{len(uploaded_dist_files)}** file(s) with **{len(distributor_df)}** total price list rows."
+        )
+    else:
+        distributor_df = None
+else:
+    distributor_df = None
 
 st.markdown("---")
 
@@ -137,10 +142,13 @@ if ahri_df is not None and distributor_df is not None:
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    # Prominent Match Button
-    if st.button("🚀 Match & Fetch Pricing Options", type="primary", use_container_width=True):
-        # Format distributor key
+
+    if st.button(
+        "🚀 Match & Fetch Pricing Options",
+        type="primary",
+        use_container_width=True,
+    ):
+        # Format distributor key column
         distributor_df["_clean_dist_key"] = (
             distributor_df[dist_key_col]
             .astype(str)
@@ -148,7 +156,7 @@ if ahri_df is not None and distributor_df is not None:
             .str.replace(".0", "", regex=False)
         )
 
-        # Merge AHRI records with distributor catalog
+        # Merge AHRI records with compiled distributor catalog
         matched_results = pd.merge(
             raw_ahri_df,
             distributor_df,
@@ -157,7 +165,7 @@ if ahri_df is not None and distributor_df is not None:
             how="left",
         )
 
-        # Drop internal helper columns
+        # Drop temporary helper key columns
         matched_results = matched_results.drop(
             columns=["_clean_ahri_key", "_clean_dist_key"], errors="ignore"
         )
@@ -167,16 +175,18 @@ if ahri_df is not None and distributor_df is not None:
 
         priced_items = matched_results[matched_results[dist_price_col].notna()]
 
-        st.success(f"✨ Matching Complete! Found prices for **{len(priced_items)}** out of **{len(raw_ahri_df)}** AHRI records.")
+        st.success(
+            f"✨ Matching Complete! Found pricing for **{len(priced_items)}** out of **{len(raw_ahri_df)}** AHRI records across uploaded distributors."
+        )
 
-        # Display Summary Cards
+        # Summary Metrics Cards
         m1, m2, m3 = st.columns(3)
         m1.metric("Selected Tonnage", selected_tonnage)
         m2.metric("Total AHRI Models", len(raw_ahri_df))
         m3.metric("Priced Matches Found", len(priced_items))
 
         # Direct Pricing Table
-        st.subheader(f"📊 {selected_tonnage} Pricing Summary Table")
+        st.subheader(f"📊 {selected_tonnage} Multi-Distributor Pricing Table")
         st.dataframe(
             matched_results,
             use_container_width=True,
@@ -187,7 +197,7 @@ if ahri_df is not None and distributor_df is not None:
             },
         )
 
-        # Download Button
+        # Excel Download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             matched_results.to_excel(
@@ -202,6 +212,10 @@ if ahri_df is not None and distributor_df is not None:
         )
 
 elif ahri_df is None:
-    st.info("💡 Please upload the **Master AHRI Spreadsheet** in Step 1 to begin.")
+    st.info(
+        "💡 Please upload the **Master AHRI Spreadsheet** in Step 1 to begin."
+    )
 elif distributor_df is None:
-    st.info("💡 Please upload a **Distributor Price List** in Step 2 to view cross-referenced pricing.")
+    st.info(
+        "💡 Please upload at least one **Distributor Price List** in Step 2 to view cross-referenced pricing."
+    )
