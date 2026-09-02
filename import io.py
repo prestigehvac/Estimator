@@ -29,34 +29,30 @@ with st.container():
 raw_ahri_df = None
 ahri_df = None
 selected_tonnage = None
-ahri_col_name = None
 
 if uploaded_ahri:
     xls_ahri = pd.ExcelFile(uploaded_ahri)
 
-    col_t1, col_t2 = st.columns([1, 2])
+    col_t1, _ = st.columns([1, 2])
     with col_t1:
         selected_tonnage = st.selectbox(
             "🎯 Select Tonnage / Capacity Tab:", options=xls_ahri.sheet_names
         )
 
-    raw_ahri_df = pd.read_excel(uploaded_ahri, sheet_name=selected_tonnage)
+    # Read without assuming row 1 is a header
+    raw_ahri_df = pd.read_excel(uploaded_ahri, sheet_name=selected_tonnage, header=None)
 
-    with col_t2:
-        ahri_col_name = st.selectbox(
-            "📌 Select AHRI Reference Column (Defaults to Column A):",
-            options=raw_ahri_df.columns,
-            index=0,
-        )
+    # Automatically set Column A as AHRI_Reference_Number
+    raw_ahri_df = raw_ahri_df.rename(columns={0: "AHRI_Reference_Number"})
 
     # Standardize AHRI reference keys
     raw_ahri_df["_clean_ahri_key"] = (
-        raw_ahri_df[ahri_col_name]
+        raw_ahri_df["AHRI_Reference_Number"]
         .astype(str)
         .str.strip()
         .str.replace(".0", "", regex=False)
     )
-    ahri_df = raw_ahri_df.dropna(subset=[ahri_col_name])
+    ahri_df = raw_ahri_df.dropna(subset=["AHRI_Reference_Number"])
 
     st.success(
         f"✅ Successfully loaded **{len(ahri_df)}** AHRI records from tab **'{selected_tonnage}'**."
@@ -97,7 +93,7 @@ if uploaded_dist_files:
                 df["Distributor_Source"] = f"{filename} ({sheet})"
                 distributor_records.append(df)
 
-        # 3. PDF Files (Line-by-Line Parsing with Deduplication)
+        # 3. PDF Files
         elif filename.endswith(".pdf"):
             seen_lines = set()
             parsed_pdf_rows = []
@@ -111,9 +107,8 @@ if uploaded_dist_files:
                             if clean_line and clean_line not in seen_lines:
                                 seen_lines.add(clean_line)
 
-                                # Extract all price values ($X,XXX.XX) from the line
+                                # Extract all price values ($X,XXX.XX) from line
                                 prices = re.findall(r"\$\s*([0-9,]+\.\d{2})", clean_line)
-                                # The system total price is typically the last price on the catalog row
                                 system_price = prices[-1] if prices else None
 
                                 parsed_pdf_rows.append({
@@ -150,11 +145,10 @@ if ahri_df is not None and distributor_df is not None:
     ):
         results = []
 
-        # Loop through each unique AHRI row and pick the first distinct catalog match
         for _, ahri_row in raw_ahri_df.iterrows():
             ahri_num = str(ahri_row["_clean_ahri_key"])
 
-            # Word boundary regex search to prevent partial matches
+            # Word boundary search to prevent partial matching
             pattern = r"\b" + re.escape(ahri_num) + r"\b"
             matched_lines = distributor_df[
                 distributor_df["Extracted_Line_Content"].str.contains(
@@ -165,7 +159,6 @@ if ahri_df is not None and distributor_df is not None:
             res_row = ahri_row.to_dict()
 
             if not matched_lines.empty:
-                # Pick the first matching catalog line to eliminate duplicate output rows
                 first_match = matched_lines.iloc[0]
                 res_row["Matched_Catalog_Line"] = first_match["Extracted_Line_Content"]
                 res_row["System_Price"] = first_match["System_Price"]
@@ -201,7 +194,7 @@ if ahri_df is not None and distributor_df is not None:
         st.subheader(f"📊 {selected_tonnage} Multi-Distributor Pricing Table")
         st.dataframe(matched_results, use_container_width=True)
 
-        # Excel Download Button
+        # Excel Download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             matched_results.to_excel(
