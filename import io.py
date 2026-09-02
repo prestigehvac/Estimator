@@ -1,4 +1,5 @@
 import io
+import re
 import pandas as pd
 import pdfplumber
 import streamlit as st
@@ -85,13 +86,13 @@ if uploaded_dist_files:
     for uploaded_file in uploaded_dist_files:
         filename = uploaded_file.name
 
-        # 1. Process CSV Files
+        # 1. CSV Files
         if filename.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
             df["Distributor_Source"] = filename
             distributor_frames.append(df)
 
-        # 2. Process Excel Files
+        # 2. Excel Files
         elif filename.endswith((".xlsx", ".xls")):
             xls = pd.ExcelFile(uploaded_file)
             for sheet in xls.sheet_names:
@@ -99,34 +100,47 @@ if uploaded_dist_files:
                 df["Distributor_Source"] = f"{filename} ({sheet})"
                 distributor_frames.append(df)
 
-        # 3. Process PDF Files (With Row Normalization Fix)
+        # 3. PDF Files (Table + Raw Text Line Extraction)
         elif filename.endswith(".pdf"):
-            pdf_rows = []
+            extracted_pdf_data = []
+
             with pdfplumber.open(uploaded_file) as pdf:
-                for page in pdf.pages:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    # A. Try extract explicit tables
                     tables = page.extract_tables()
                     for table in tables:
                         for row in table:
-                            # Filter empty or all-None rows
-                            if row and any(cell is not None and str(cell).strip() != "" for cell in row):
-                                pdf_rows.append(row)
+                            if row and any(
+                                cell is not None and str(cell).strip() != ""
+                                for cell in row
+                            ):
+                                extracted_pdf_data.append(row)
 
-            if pdf_rows:
-                # Find maximum column count across all extracted rows
-                max_cols = max(len(r) for r in pdf_rows)
-                
-                # Standardize header
-                headers = [
-                    str(h).strip() if h is not None and str(h).strip() != "" else f"Col_{i+1}"
-                    for i, h in enumerate(pdf_rows[0])
-                ]
-                # Pad header if missing columns
-                while len(headers) < max_cols:
-                    headers.append(f"Col_{len(headers)+1}")
+                    # B. Extract raw text line-by-line to catch missing models/prices
+                    text = page.extract_text()
+                    if text:
+                        lines = text.split("\n")
+                        for line in lines:
+                            # Search for price patterns like $1,234.56 or 1234.56
+                            price_match = re.search(r"\$?\s*([0-9,]+\.\d{2})", line)
+                            if price_match:
+                                parts = line.split()
+                                extracted_pdf_data.append(
+                                    [parts[0], line, price_match.group(1)]
+                                )
 
-                # Pad or trim data rows to match header length exactly
+            if extracted_pdf_data:
+                # Standardize column structure
+                max_cols = max(len(r) for r in extracted_pdf_data)
+                headers = [f"Col_{i+1}" for i in range(max_cols)]
+                headers[0] = "Model_or_AHRI"
+                if max_cols > 1:
+                    headers[1] = "Full_Line_Text"
+                if max_cols > 2:
+                    headers[2] = "Extracted_Price"
+
                 normalized_rows = []
-                for r in pdf_rows[1:]:
+                for r in extracted_pdf_data:
                     row_data = list(r)
                     if len(row_data) < max_cols:
                         row_data.extend([None] * (max_cols - len(row_data)))
@@ -141,7 +155,7 @@ if uploaded_dist_files:
     if distributor_frames:
         distributor_df = pd.concat(distributor_frames, ignore_index=True)
         st.success(
-            f"✅ Processed **{len(uploaded_dist_files)}** file(s) with **{len(distributor_df)}** total price list rows."
+            f"✅ Processed **{len(uploaded_dist_files)}** file(s) with **{len(distributor_df)}** extracted distributor lines."
         )
     else:
         distributor_df = None
@@ -173,7 +187,7 @@ if ahri_df is not None and distributor_df is not None:
         type="primary",
         use_container_width=True,
     ):
-        # Format distributor key column
+        # Flexible string matching (regex partial match supported)
         distributor_df["_clean_dist_key"] = (
             distributor_df[dist_key_col]
             .astype(str)
@@ -181,7 +195,7 @@ if ahri_df is not None and distributor_df is not None:
             .str.replace(".0", "", regex=False)
         )
 
-        # Merge AHRI records with compiled distributor catalog
+        # Merge AHRI records with catalog
         matched_results = pd.merge(
             raw_ahri_df,
             distributor_df,
@@ -190,12 +204,10 @@ if ahri_df is not None and distributor_df is not None:
             how="left",
         )
 
-        # Drop temporary helper key columns
+        # Clean helper columns
         matched_results = matched_results.drop(
             columns=["_clean_ahri_key", "_clean_dist_key"], errors="ignore"
         )
-
-        # Tag results with selected tonnage
         matched_results.insert(0, "Selected_Tonnage", selected_tonnage)
 
         priced_items = matched_results[matched_results[dist_price_col].notna()]
@@ -204,18 +216,15 @@ if ahri_df is not None and distributor_df is not None:
             f"✨ Matching Complete! Found pricing for **{len(priced_items)}** out of **{len(raw_ahri_df)}** AHRI records."
         )
 
-        # Summary Metrics Cards
+        # Metrics
         m1, m2, m3 = st.columns(3)
         m1.metric("Selected Tonnage", selected_tonnage)
         m2.metric("Total AHRI Models", len(raw_ahri_df))
         m3.metric("Priced Matches Found", len(priced_items))
 
-        # Direct Pricing Table
+        # Pricing Table
         st.subheader(f"📊 {selected_tonnage} Multi-Distributor Pricing Table")
-        st.dataframe(
-            matched_results,
-            use_container_width=True,
-        )
+        st.dataframe(matched_results, use_container_width=True)
 
         # Excel Download
         output = io.BytesIO()
