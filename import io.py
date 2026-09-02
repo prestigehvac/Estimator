@@ -97,39 +97,30 @@ if uploaded_dist_files:
                 df["Distributor_Source"] = f"{filename} ({sheet})"
                 distributor_records.append(df)
 
-        # 3. PDF Files (Full Line-by-Line Parsing)
+        # 3. PDF Files (Line-by-Line Parsing with Deduplication)
         elif filename.endswith(".pdf"):
-            pdf_lines = []
+            seen_lines = set()
+            parsed_pdf_rows = []
+
             with pdfplumber.open(uploaded_file) as pdf:
                 for page in pdf.pages:
-                    # A. Table Extraction
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            if row:
-                                clean_row = [str(c).strip() for c in row if c is not None]
-                                if clean_row:
-                                    pdf_lines.append(" | ".join(clean_row))
-
-                    # B. Full Page Text Extraction
                     text = page.extract_text()
                     if text:
                         for line in text.split("\n"):
-                            if line.strip():
-                                pdf_lines.append(line.strip())
+                            clean_line = line.strip()
+                            if clean_line and clean_line not in seen_lines:
+                                seen_lines.add(clean_line)
 
-            # Convert PDF extracted lines into a structured DataFrame
-            parsed_pdf_rows = []
-            for line in pdf_lines:
-                # Find price pattern ($X,XXX.XX or XXX.XX)
-                price_match = re.search(r"\$?\s*([0-9,]+\.\d{2})", line)
-                price_val = price_match.group(1) if price_match else None
-                
-                parsed_pdf_rows.append({
-                    "Extracted_Line_Content": line,
-                    "Detected_Price": price_val,
-                    "Distributor_Source": filename
-                })
+                                # Extract all price values ($X,XXX.XX) from the line
+                                prices = re.findall(r"\$\s*([0-9,]+\.\d{2})", clean_line)
+                                # The system total price is typically the last price on the catalog row
+                                system_price = prices[-1] if prices else None
+
+                                parsed_pdf_rows.append({
+                                    "Extracted_Line_Content": clean_line,
+                                    "System_Price": system_price,
+                                    "Distributor_Source": filename,
+                                })
 
             if parsed_pdf_rows:
                 pdf_df = pd.DataFrame(parsed_pdf_rows)
@@ -138,7 +129,7 @@ if uploaded_dist_files:
     if distributor_records:
         distributor_df = pd.concat(distributor_records, ignore_index=True)
         st.success(
-            f"✅ Processed **{len(uploaded_dist_files)}** file(s) with **{len(distributor_df)}** extracted distributor lines."
+            f"✅ Processed **{len(uploaded_dist_files)}** file(s) with **{len(distributor_df)}** unique catalog rows."
         )
     else:
         distributor_df = None
@@ -159,52 +150,58 @@ if ahri_df is not None and distributor_df is not None:
     ):
         results = []
 
-        # Perform substring searching across all extracted PDF catalog lines
+        # Loop through each unique AHRI row and pick the first distinct catalog match
         for _, ahri_row in raw_ahri_df.iterrows():
             ahri_num = str(ahri_row["_clean_ahri_key"])
-            
-            # Find matching lines containing the AHRI or Model number
+
+            # Word boundary regex search to prevent partial matches
+            pattern = r"\b" + re.escape(ahri_num) + r"\b"
             matched_lines = distributor_df[
-                distributor_df["Extracted_Line_Content"].str.contains(ahri_num, case=False, na=False)
+                distributor_df["Extracted_Line_Content"].str.contains(
+                    pattern, regex=True, na=False
+                )
             ]
 
+            res_row = ahri_row.to_dict()
+
             if not matched_lines.empty:
-                for _, dist_row in matched_lines.iterrows():
-                    res_row = ahri_row.to_dict()
-                    res_row["Matched_Catalog_Line"] = dist_row["Extracted_Line_Content"]
-                    res_row["Distributor_Price"] = dist_row["Detected_Price"]
-                    res_row["Catalog_Source"] = dist_row["Distributor_Source"]
-                    results.append(res_row)
+                # Pick the first matching catalog line to eliminate duplicate output rows
+                first_match = matched_lines.iloc[0]
+                res_row["Matched_Catalog_Line"] = first_match["Extracted_Line_Content"]
+                res_row["System_Price"] = first_match["System_Price"]
+                res_row["Catalog_Source"] = first_match["Distributor_Source"]
             else:
-                res_row = ahri_row.to_dict()
                 res_row["Matched_Catalog_Line"] = "No direct match found in PDF"
-                res_row["Distributor_Price"] = None
+                res_row["System_Price"] = None
                 res_row["Catalog_Source"] = None
-                results.append(res_row)
+
+            results.append(res_row)
 
         matched_results = pd.DataFrame(results)
 
-        # Drop temporary keys
-        matched_results = matched_results.drop(columns=["_clean_ahri_key"], errors="ignore")
+        # Drop temporary cleaning keys
+        matched_results = matched_results.drop(
+            columns=["_clean_ahri_key"], errors="ignore"
+        )
         matched_results.insert(0, "Selected_Tonnage", selected_tonnage)
 
-        priced_count = matched_results["Distributor_Price"].notna().sum()
+        priced_count = matched_results["System_Price"].notna().sum()
 
         st.success(
-            f"✨ Matching Complete! Found matches for **{priced_count}** out of **{len(raw_ahri_df)}** AHRI records."
+            f"✨ Matching Complete! Found prices for **{priced_count}** out of **{len(raw_ahri_df)}** AHRI records."
         )
 
-        # Metrics
+        # Metrics Summary
         m1, m2, m3 = st.columns(3)
         m1.metric("Selected Tonnage", selected_tonnage)
         m2.metric("Total AHRI Models", len(raw_ahri_df))
         m3.metric("Priced Matches Found", priced_count)
 
-        # Output Table
+        # Pricing Output Table
         st.subheader(f"📊 {selected_tonnage} Multi-Distributor Pricing Table")
         st.dataframe(matched_results, use_container_width=True)
 
-        # Excel Download
+        # Excel Download Button
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             matched_results.to_excel(
@@ -221,4 +218,6 @@ if ahri_df is not None and distributor_df is not None:
 elif ahri_df is None:
     st.info("💡 Please upload the **Master AHRI Spreadsheet** in Step 1 to begin.")
 elif distributor_df is None:
-    st.info("💡 Please upload at least one **Distributor Price List** in Step 2 to view cross-referenced pricing.")
+    st.info(
+        "💡 Please upload at least one **Distributor Price List** in Step 2 to view cross-referenced pricing."
+    )
