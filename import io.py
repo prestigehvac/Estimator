@@ -84,51 +84,66 @@ with st.container():
                     df["Distributor_Source"] = f"{filename} ({sheet})"
                     distributor_records.append(df)
 
-            # 3. PDF Files (Enhanced Multi-Line Block Parsing)
+            # 3. PDF Files (Strict 9-Digit AHRI + Highest Dollar Amount)
             elif filename.endswith(".pdf"):
                 parsed_pdf_rows = []
 
                 with pdfplumber.open(uploaded_file) as pdf:
-                    for page_idx, page in enumerate(pdf.pages):
-                        page_text = page.extract_text() or ""
-                        
-                        # Process both raw page text and table rows
-                        lines = [l.strip() for l in page_text.split("\n") if l.strip()]
-                        
+                    for page in pdf.pages:
+                        page_lines = []
+
+                        # Extract layout tables
                         tables = page.extract_tables() or []
                         for table in tables:
                             for row in table:
-                                row_str = " ".join([str(c).strip() for c in row if c])
-                                if row_str:
-                                    lines.append(row_str)
+                                clean_cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+                                if clean_cells:
+                                    page_lines.append(" ".join(clean_cells))
 
-                        # Parse entries line by line & block by block
-                        for i, line in enumerate(lines):
-                            # Find any 7 to 10 digit AHRI reference numbers in line
-                            ahri_candidates = re.findall(r"\b\d{7,10}\b", line)
-                            
-                            # Search current line + next 2 lines for price matches
-                            block_text = " ".join(lines[i:i+3])
-                            # Pattern matches $3,336.58 or 3336.58 or 3,336.58
-                            prices = re.findall(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})+\.\d{2}|[0-9]{3,6}\.\d{2})", block_text)
-                            
-                            price_val = prices[-1] if prices else None
+                        # Extract raw page text
+                        raw_text = page.extract_text() or ""
+                        for line in raw_text.split("\n"):
+                            line_clean = line.strip()
+                            if line_clean:
+                                page_lines.append(line_clean)
 
-                            if ahri_candidates:
-                                for ahri_found in ahri_candidates:
+                        # Process lines for 9-digit AHRI IDs & Max Dollar Amount
+                        for line in page_lines:
+                            # Strict match for 9-digit AHRI numbers
+                            ahri_matches = re.findall(r"\b\d{9}\b", line)
+                            
+                            # Find all price strings on the line
+                            raw_prices = re.findall(
+                                r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d{2}|[0-9]{3,6}\.\d{2})", line
+                            )
+
+                            system_price = None
+                            if raw_prices:
+                                float_prices = []
+                                for p in raw_prices:
+                                    try:
+                                        float_prices.append(float(p.replace(",", "")))
+                                    except ValueError:
+                                        continue
+                                
+                                if float_prices:
+                                    # Select the highest dollar amount on the line
+                                    max_val = max(float_prices)
+                                    system_price = f"{max_val:,.2f}"
+
+                            if ahri_matches:
+                                for ahri_id in ahri_matches:
                                     parsed_pdf_rows.append({
-                                        "Extracted_AHRI": ahri_found,
+                                        "Extracted_AHRI": ahri_id,
                                         "Extracted_Line_Content": line,
-                                        "System_Price": price_val,
+                                        "System_Price": system_price,
                                         "Distributor_Source": filename,
                                     })
                             else:
-                                # Fallback record for line-based matching
-                                prices_line = re.findall(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})+\.\d{2}|[0-9]{3,6}\.\d{2})", line)
                                 parsed_pdf_rows.append({
                                     "Extracted_AHRI": None,
                                     "Extracted_Line_Content": line,
-                                    "System_Price": prices_line[-1] if prices_line else None,
+                                    "System_Price": system_price,
                                     "Distributor_Source": filename,
                                 })
 
@@ -159,13 +174,11 @@ if ahri_df is not None and distributor_records:
         if not ahri_num or ahri_num == "nan":
             continue
 
-        # Match by extracted AHRI candidate key or string containment
         matched_rows = distributor_df[
             (distributor_df["Extracted_AHRI"] == ahri_num) |
             (distributor_df["Extracted_Line_Content"].str.contains(re.escape(ahri_num), case=False, na=False))
         ]
 
-        # Prioritize matches that successfully captured a System_Price
         if not matched_rows.empty:
             valid_price_matches = matched_rows[matched_rows["System_Price"].notna()]
             target_df = valid_price_matches if not valid_price_matches.empty else matched_rows
