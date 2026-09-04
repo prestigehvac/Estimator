@@ -84,7 +84,7 @@ with st.container():
                     df["Distributor_Source"] = f"{filename} ({sheet})"
                     distributor_records.append(df)
 
-            # 3. PDF Files (Strict 9-Digit AHRI + Highest Dollar Amount)
+            # 3. PDF Files (Highest Price Extraction per AHRI Line)
             elif filename.endswith(".pdf"):
                 parsed_pdf_rows = []
 
@@ -107,17 +107,17 @@ with st.container():
                             if line_clean:
                                 page_lines.append(line_clean)
 
-                        # Process lines for 9-digit AHRI IDs & Max Dollar Amount
+                        # Parse lines for 9-digit AHRI numbers and maximum dollar amount
                         for line in page_lines:
-                            # Strict match for 9-digit AHRI numbers
+                            # Match strict 9-digit AHRI reference numbers
                             ahri_matches = re.findall(r"\b\d{9}\b", line)
                             
-                            # Find all price strings on the line
+                            # Find all price strings on the line ($1,234.56 or 1234.56)
                             raw_prices = re.findall(
                                 r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*\.\d{2}|[0-9]{3,6}\.\d{2})", line
                             )
 
-                            system_price = None
+                            highest_price = None
                             if raw_prices:
                                 float_prices = []
                                 for p in raw_prices:
@@ -127,23 +127,23 @@ with st.container():
                                         continue
                                 
                                 if float_prices:
-                                    # Select the highest dollar amount on the line
+                                    # Select the highest price value on the AHRI line
                                     max_val = max(float_prices)
-                                    system_price = f"{max_val:,.2f}"
+                                    highest_price = f"{max_val:,.2f}"
 
                             if ahri_matches:
                                 for ahri_id in ahri_matches:
                                     parsed_pdf_rows.append({
                                         "Extracted_AHRI": ahri_id,
                                         "Extracted_Line_Content": line,
-                                        "System_Price": system_price,
+                                        "System_Price": highest_price,
                                         "Distributor_Source": filename,
                                     })
                             else:
                                 parsed_pdf_rows.append({
                                     "Extracted_AHRI": None,
                                     "Extracted_Line_Content": line,
-                                    "System_Price": system_price,
+                                    "System_Price": highest_price,
                                     "Distributor_Source": filename,
                                 })
 
